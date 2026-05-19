@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>A股成交量集中度 实时量化信号</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-slate-900 text-gray-100 min-h-screen p-4 md:p-6">
+    <div class="max-w-6xl mx-auto">
+        <div class="text-center mb-6">
+            <h1 class="text-3xl font-bold text-red-500">成交量集中度逃顶信号</h1>
+            <p class="text-gray-400 mt-2">全网免费实时行情 · 纯网页自动计算 · 阈值≥45%预警</p>
+        </div>
+
+        <div class="bg-slate-800 rounded-xl p-5 mb-6 border border-slate-700">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
+                <div>
+                    <p class="text-gray-400 text-sm">统计时间</p>
+                    <p id="nowTime" class="text-xl font-bold">-</p>
+                </div>
+                <div>
+                    <p class="text-gray-400 text-sm">全市场总成交额(亿)</p>
+                    <p id="totalMoney" class="text-xl font-bold text-white">-</p>
+                </div>
+                <div>
+                    <p class="text-gray-400 text-sm">TOP50成交额(亿)</p>
+                    <p id="topMoney" class="text-xl font-bold text-white">-</p>
+                </div>
+                <div>
+                    <p class="text-gray-400 text-sm">实时集中度</p>
+                    <p id="rateText" class="text-xl font-bold text-amber-400">-</p>
+                </div>
+            </div>
+            <div id="warnTip" class="mt-5 text-center text-xl font-semibold"></div>
+        </div>
+
+        <div class="bg-slate-800 rounded-xl p-5 mb-6 border border-slate-700">
+            <h2 class="text-lg text-emerald-400 mb-3">集中度实时趋势图</h2>
+            <canvas id="mainChart" height="260"></canvas>
+        </div>
+
+        <div class="bg-slate-800 rounded-xl p-5 border border-slate-700">
+            <h2 class="text-lg text-blue-400 mb-3">交易使用规则</h2>
+            <ul class="text-gray-300 space-y-2">
+                <li>1. 统计规则：A股成交额前50只个股 ÷ 全市场总成交额</li>
+                <li>2. 安全区间：20% - 44% 市场资金分散，行情健康</li>
+                <li>3. 风险预警：<span class="text-red-400 font-bold">≥45%</span> 资金极致抱团，中线见顶概率极大</li>
+                <li>4. 适用周期：中线逃顶信号，不做短线日内</li>
+                <li>5. 数据说明：盘中实时滚动成交额，月末数据最精准</li>
+            </ul>
+        </div>
+
+        <p class="text-center text-gray-500 text-sm mt-6">自动刷新间隔：25秒 | 仅学习参考，不构成投资建议</p>
+    </div>
+
+    <script>
+        const TOP_NUM = 50;
+        const WARNING_LINE = 45;
+        let historyData = [];
+        let timeLabel = [];
+        let chartIns = null;
+
+        // 初始化图表
+        function initChart() {
+            const ctx = document.getElementById('mainChart').getContext('2d');
+            chartIns = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: '实时集中度(%)',
+                            data: [],
+                            borderColor: '#f59e0b',
+                            backgroundColor: 'rgba(245,158,11,0.15)',
+                            fill: true,
+                            tension: 0.3
+                        },
+                        {
+                            label: '45%风险警戒线',
+                            data: [],
+                            borderColor: '#ef4444',
+                            borderDash: [6,4],
+                            pointRadius: 0,
+                            fill: false
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { labels: { color: '#cbd5e1' } }
+                    },
+                    scales: {
+                        y: {
+                            min: 20,
+                            max: 60,
+                            grid: { color: 'rgba(255,255,255,0.1)' },
+                            ticks: { color: '#cbd5e1' }
+                        },
+                        x: {
+                            grid: { color: 'rgba(255,255,255,0.1)' },
+                            ticks: { color: '#cbd5e1' }
+                        }
+                    }
+                }
+            })
+        }
+
+        // 获取A股全部行情数据
+        async function getStockData() {
+            try {
+                const url = "https://push2.eastmoney.com/api/qt/clist/get?f=f1&pn=1&pz=8000&po=1&np=1&fields=f1,f2,f3,f4,f5,f6,f12,f13,f14,f15,f16,f17,f18,f20,f21,f22&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23";
+                const res = await fetch(url);
+                const json = await res.json();
+                const list = json.data.diff;
+                if(!list) return;
+
+                let allMoney = 0;
+                let stockArr = [];
+
+                list.forEach(item => {
+                    let money = Number(item.f6 || 0);
+                    if(money > 0){
+                        allMoney += money;
+                        stockArr.push(money);
+                    }
+                });
+
+                // 排序取前50
+                stockArr.sort((a,b)=>b-a);
+                let topSum = 0;
+                for(let i=0;i<TOP_NUM;i++){
+                    if(stockArr[i]) topSum += stockArr[i];
+                }
+
+                // 计算百分比
+                let rate = (topSum / allMoney) * 100;
+                rate = Number(rate.toFixed(2));
+
+                // 单位换算 亿元
+                let totalYi = (allMoney / 100000000).toFixed(2);
+                let topYi = (topSum / 100000000).toFixed(2);
+
+                // 页面赋值
+                const now = new Date();
+                const nowStr = `${now.getMonth()+1}月${now.getDate()}日 ${now.getHours()}:${String(now.getMinutes()).padStart(2,0)}`;
+                document.getElementById("nowTime").innerText = nowStr;
+                document.getElementById("totalMoney").innerText = totalYi;
+                document.getElementById("topMoney").innerText = topYi;
+                document.getElementById("rateText").innerText = rate + "%";
+
+                // 风险提示
+                const warnDom = document.getElementById("warnTip");
+                if(rate >= WARNING_LINE){
+                    warnDom.className = "mt-5 text-center text-xl font-semibold text-red-500";
+                    warnDom.innerText = "⚠️ 达到风险阈值！抱团严重，谨防中线大跌";
+                }else{
+                    warnDom.className = "mt-5 text-center text-xl font-semibold text-green-400";
+                    warnDom.innerText = "✅ 资金分布正常，无见顶风险信号";
+                }
+
+                // 更新图表
+                timeLabel.push(now.getHours()+":"+String(now.getMinutes()).padStart(2,0));
+                historyData.push(rate);
+                if(timeLabel.length > 35){
+                    timeLabel.shift();
+                    historyData.shift();
+                }
+                chartIns.data.labels = timeLabel;
+                chartIns.data.datasets[0].data = historyData;
+                chartIns.data.datasets[1].data = timeLabel.map(()=>WARNING_LINE);
+                chartIns.update();
+
+            } catch (e) {
+                console.log("数据获取失败",e);
+            }
+        }
+
+        window.onload = function(){
+            initChart();
+            getStockData();
+            setInterval(getStockData,25000);
+        }
+    </script>
+</body>
+</html>
