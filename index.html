@@ -41,6 +41,12 @@
             <canvas id="mainChart" height="260"></canvas>
         </div>
 
+        <div class="bg-slate-800 rounded-xl p-5 mb-6 border border-slate-700">
+            <h2 class="text-lg text-purple-400 mb-3">历史集中度走势 (2007年至今)</h2>
+            <p class="text-gray-500 text-xs mb-3">月度数据 · 上证50成交额 / 上证指数成交额 (近似参考) · <span id="historyStatus" class="text-gray-600">加载中...</span></p>
+            <canvas id="historyChart" height="300"></canvas>
+        </div>
+
         <div class="bg-slate-800 rounded-xl p-5 border border-slate-700">
             <h2 class="text-lg text-blue-400 mb-3">交易使用规则</h2>
             <ul class="text-gray-300 space-y-2">
@@ -61,6 +67,7 @@
         let historyData = [];
         let timeLabel = [];
         let chartIns = null;
+        let historyChartIns = null;
 
         // 初始化图表
         function initChart() {
@@ -179,9 +186,162 @@
             }
         }
 
+        // ========== 历史集中度图表 ==========
+
+        function initHistoryChart() {
+            const ctx = document.getElementById('historyChart').getContext('2d');
+            historyChartIns = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: '月度集中度(%)',
+                            data: [],
+                            borderColor: '#a78bfa',
+                            backgroundColor: 'rgba(167,139,250,0.1)',
+                            fill: true,
+                            tension: 0.2,
+                            pointRadius: 0
+                        },
+                        {
+                            label: '45%警戒线',
+                            data: [],
+                            borderColor: '#ef4444',
+                            borderDash: [6, 4],
+                            pointRadius: 0,
+                            fill: false
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    interaction: {
+                        intersect: false,
+                        mode: 'index'
+                    },
+                    plugins: {
+                        legend: { labels: { color: '#cbd5e1' } },
+                        tooltip: {
+                            callbacks: {
+                                label: function(ctx) {
+                                    return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(2) + '%';
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        y: {
+                            min: 15,
+                            max: 55,
+                            grid: { color: 'rgba(255,255,255,0.08)' },
+                            ticks: { color: '#cbd5e1', callback: v => v + '%' }
+                        },
+                        x: {
+                            grid: { color: 'rgba(255,255,255,0.08)' },
+                            ticks: {
+                                color: '#cbd5e1',
+                                maxTicksLimit: 20,
+                                callback: function(val, index) {
+                                    const label = this.getLabelForValue(val);
+                                    return label && label.endsWith('-01') ? label.substring(0, 4) : '';
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        async function fetchHistoryKline(secid) {
+            const url = 'https://push2his.eastmoney.com/api/qt/stock/kline/get'
+                + '?secid=' + secid
+                + '&fields1=f1,f2,f3,f4,f5,f6'
+                + '&fields2=f51,f52,f53,f54,f55,f56,f57'
+                + '&klt=101&fqt=1&end=20500101&lmt=5000';
+            const res = await fetch(url);
+            const json = await res.json();
+            if (!json || !json.data || !json.data.klines) return null;
+            return json.data.klines;
+        }
+
+        function aggregateToMonthly(klines) {
+            var monthly = {};
+            for (var i = 0; i < klines.length; i++) {
+                var parts = klines[i].split(',');
+                var date = parts[0];
+                var amount = parseFloat(parts[6]) || 0;
+                if (amount <= 0) continue;
+                var month = date.substring(0, 7);
+                if (!monthly[month]) {
+                    monthly[month] = { total: 0, count: 0 };
+                }
+                monthly[month].total += amount;
+                monthly[month].count++;
+            }
+            var months = Object.keys(monthly).sort();
+            var amounts = [];
+            for (var j = 0; j < months.length; j++) {
+                var m = monthly[months[j]];
+                amounts.push(m.total / m.count);
+            }
+            return { months: months, amounts: amounts };
+        }
+
+        async function loadHistoryData() {
+            try {
+                var results = await Promise.all([
+                    fetchHistoryKline('1.000001'),
+                    fetchHistoryKline('1.000016')
+                ]);
+                var sseKlines = results[0];
+                var sse50Klines = results[1];
+
+                if (!sseKlines || !sse50Klines) {
+                    console.error('历史K线数据获取失败');
+                    return;
+                }
+
+                var sseMonthly = aggregateToMonthly(sseKlines);
+                var sse50Monthly = aggregateToMonthly(sse50Klines);
+
+                var sseMap = {};
+                for (var i = 0; i < sseMonthly.months.length; i++) {
+                    sseMap[sseMonthly.months[i]] = sseMonthly.amounts[i];
+                }
+
+                var labels = [];
+                var concData = [];
+
+                for (var j = 0; j < sse50Monthly.months.length; j++) {
+                    var m = sse50Monthly.months[j];
+                    if (m >= '2007-01' && sseMap[m] && sseMap[m] > 0) {
+                        labels.push(m);
+                        concData.push(parseFloat(((sse50Monthly.amounts[j] / sseMap[m]) * 100).toFixed(2)));
+                    }
+                }
+
+                if (labels.length === 0) {
+                    console.error('无可用历史数据');
+                    return;
+                }
+
+                historyChartIns.data.labels = labels;
+                historyChartIns.data.datasets[0].data = concData;
+                historyChartIns.data.datasets[1].data = labels.map(function() { return 45; });
+                historyChartIns.update();
+
+                document.getElementById('historyStatus').innerText = '已加载 ' + labels.length + ' 个月数据 (' + labels[0] + ' ~ ' + labels[labels.length - 1] + ')';
+            } catch (e) {
+                console.error('加载历史数据异常', e);
+            }
+        }
+
         window.onload = function(){
             initChart();
+            initHistoryChart();
             getStockData();
+            loadHistoryData();
             setInterval(getStockData,25000);
         }
     </script>
